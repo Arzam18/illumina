@@ -35,37 +35,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
-      # Fix the missing standard header for std::stringstream.
       - name: Fix Missing Stringstream Include
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path("cli/state.cpp")
+
           if not p.is_file():
               raise SystemExit("ERROR: cli/state.cpp was not found")
 
           source = p.read_text()
 
           if "#include <sstream>" not in source:
-              lines = source.splitlines(keepends=True)
+              source = "#include <sstream>\n" + source
+              p.write_text(source)
 
-              # Insert after the existing include block.
-              include_positions = [
-                  i for i, line in enumerate(lines)
-                  if line.lstrip().startswith("#include ")
-              ]
-
-              if include_positions:
-                  pos = max(include_positions) + 1
-                  lines.insert(pos, "#include <sstream>\n")
-              else:
-                  lines.insert(0, "#include <sstream>\n")
-
-              p.write_text("".join(lines))
+          if "#include <sstream>" not in p.read_text():
+              raise SystemExit("ERROR: Failed to add <sstream>")
 
           print("Verified <sstream> in cli/state.cpp")
           PY
+
+          echo "=== Confirming header location ==="
+          grep -n '#include <sstream>' cli/state.cpp
 
       - name: Verify ARM64 SIMD Source
         run: |

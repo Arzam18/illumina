@@ -1,10 +1,11 @@
+
 name: Build Illumina Android Binary
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   workflow_dispatch:
 
 jobs:
@@ -13,10 +14,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository with Submodules
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      # Initialize only the valid required submodule.
+      # Avoid the broken ext/litetest entry.
+      - name: Initialize SQLiteCpp
+        run: |
+          git submodule update --init --depth=1 ext/SQLiteCpp
+          test -f ext/SQLiteCpp/CMakeLists.txt
 
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
@@ -24,69 +32,72 @@ jobs:
         with:
           ndk-version: r26b
 
-      - name: Adjust CMakeLists and Patch x86-only Headers for ARM64
+      - name: Install Build Tools
         run: |
-          # Restrict ARCHS to 'base' to avoid x86-specific compiler flags (-mavx2, -mbmi2)
-          sed -i 's/set(ARCHS bmi2 avx2 base)/set(ARCHS base)/g' CMakeLists.txt
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
 
-          # Use Python to safely guard unconditional <cpuid.h> and <immintrin.h> inclusions for non-x86 targets
-          python3 - <<EOF
-          import glob
-
-          files = glob.glob("illumina/**/*.h", recursive=True) + glob.glob("illumina/**/*.cpp", recursive=True)
-          for filepath in files:
-              with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                  content = f.read()
-              
-              modified = False
-              if "#include <cpuid.h>" in content:
-                  content = content.replace(
-                      "#include <cpuid.h>",
-                      "#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)\n#include <cpuid.h>\n#endif"
-                  )
-                  modified = True
-              
-              if "#include <immintrin.h>" in content:
-                  content = content.replace(
-                      "#include <immintrin.h>",
-                      "#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)\n#include <immintrin.h>\n#endif"
-                  )
-                  modified = True
-              
-              if modified:
-                  with open(filepath, "w", encoding="utf-8") as f:
-                      f.write(content)
-                  print(f"Patched header guards in {filepath}")
-          EOF
-
-      - name: Configure CMake for Android
+      - name: Verify ARM64 SIMD Source
         run: |
-          cmake -B build \
-            -DCMAKE_TOOLCHAIN_FILE="${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+          echo "Checking SIMD-related source files..."
+          find illumina ext -type f \
+            \( -name 'simd.h' -o -name 'sse2neon.h' \) \
+            -print
+
+          echo "Checking NEON and SSE compatibility references..."
+          grep -R -n -E 'arm64_neon|sse2neon|#define NEON|__ARM_NEON' \
+            CMakeLists.txt illumina ext/include \
+            --include='*.cmake' --include='CMakeLists.txt' \
+            --include='*.h' --include='*.cpp' || true
+
+      - name: Configure CMake for Android ARM64
+        run: |
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+
+          test -f "$NDK/build/cmake/android.toolchain.cmake"
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_BUILD_TYPE=Release \
             -DDEVELOPMENT=OFF
 
+      - name: Inspect Selected SIMD Configuration
+        run: |
+          echo "=== Architecture and compile definitions ==="
+          grep -R -n -E 'arm64_neon|NEON|sse2neon|march=' \
+            build/build.ninja build/compile_commands.json \
+            2>/dev/null || true
+
       - name: Build Executable
         run: |
-          cmake --build build --config Release -j$(nproc)
+          cmake --build build --parallel 2
 
-      - name: Locate and Prepare Artifact
+      - name: Locate and Verify Executable
         run: |
+          set -eu
           mkdir -p output
-          echo "Searching for compiled binaries in build directory:"
-          find build -type f
-          
-          # Find any file named 'illumina' (excluding object files, archives, and cmake files) and copy it
-          find build -name "illumina" -type f -not -name "*.o" -not -name "*.a" -not -name "*.cmake" -exec cp {} output/illumina_android_arm64 \;
-          
-          # Fallback if target name has an extension or slightly different casing
-          if [ ! -f output/illumina_android_arm64 ]; then
-            find build -name "illumina*" -type f -not -name "*.o" -not -name "*.a" -not -name "*.cmake" -exec cp {} output/illumina_android_arm64 \;
+
+          echo "=== Candidate executables ==="
+          find build -type f -executable -print
+
+          BIN="$(find build -type f -name illumina \
+            -executable -print -quit)"
+
+          if [ -z "$BIN" ]; then
+            echo "::error::Could not find the illumina executable."
+            echo "Inspect the build output and CMake target names."
+            exit 1
           fi
-          
+
+          cp "$BIN" output/illumina_android_arm64
           chmod +x output/illumina_android_arm64
+
+          file output/illumina_android_arm64
+
+          readelf -h output/illumina_android_arm64
+          readelf -l output/illumina_android_arm64
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

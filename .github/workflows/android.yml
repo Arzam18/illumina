@@ -19,8 +19,6 @@ jobs:
         with:
           submodules: false
 
-      # Initialize only the valid required submodule.
-      # Avoid the broken ext/litetest entry.
       - name: Initialize SQLiteCpp
         run: |
           git submodule update --init --depth=1 ext/SQLiteCpp
@@ -37,18 +35,52 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
+      # Fix the missing standard header for std::stringstream.
+      - name: Fix Missing Stringstream Include
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("cli/state.cpp")
+          if not p.is_file():
+              raise SystemExit("ERROR: cli/state.cpp was not found")
+
+          source = p.read_text()
+
+          if "#include <sstream>" not in source:
+              lines = source.splitlines(keepends=True)
+
+              # Insert after the existing include block.
+              include_positions = [
+                  i for i, line in enumerate(lines)
+                  if line.lstrip().startswith("#include ")
+              ]
+
+              if include_positions:
+                  pos = max(include_positions) + 1
+                  lines.insert(pos, "#include <sstream>\n")
+              else:
+                  lines.insert(0, "#include <sstream>\n")
+
+              p.write_text("".join(lines))
+
+          print("Verified <sstream> in cli/state.cpp")
+          PY
+
       - name: Verify ARM64 SIMD Source
         run: |
-          echo "Checking SIMD-related source files..."
+          echo "=== SIMD-related source files ==="
           find illumina ext -type f \
             \( -name 'simd.h' -o -name 'sse2neon.h' \) \
             -print
 
-          echo "Checking NEON and SSE compatibility references..."
+          echo "=== SIMD configuration references ==="
           grep -R -n -E 'arm64_neon|sse2neon|#define NEON|__ARM_NEON' \
             CMakeLists.txt illumina ext/include \
-            --include='*.cmake' --include='CMakeLists.txt' \
-            --include='*.h' --include='*.cpp' || true
+            --include='*.cmake' \
+            --include='CMakeLists.txt' \
+            --include='*.h' \
+            --include='*.cpp' || true
 
       - name: Configure CMake for Android ARM64
         run: |
@@ -63,12 +95,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DDEVELOPMENT=OFF
 
-      - name: Inspect Selected SIMD Configuration
+      - name: Inspect SIMD Configuration
         run: |
-          echo "=== Architecture and compile definitions ==="
-          grep -R -n -E 'arm64_neon|NEON|sse2neon|march=' \
-            build/build.ninja build/compile_commands.json \
-            2>/dev/null || true
+          echo "=== NEON compile definitions and flags ==="
+          grep -n -E 'arm64_neon|NEON|sse2neon|march=' \
+            build/build.ninja 2>/dev/null || true
 
       - name: Build Executable
         run: |
@@ -87,19 +118,23 @@ jobs:
 
           if [ -z "$BIN" ]; then
             echo "::error::Could not find the illumina executable."
-            echo "Inspect the build output and CMake target names."
+            echo "Check the CMake target name and build output."
             exit 1
           fi
 
           cp "$BIN" output/illumina_android_arm64
           chmod +x output/illumina_android_arm64
 
+          echo "=== Binary file information ==="
           file output/illumina_android_arm64
 
+          echo "=== ELF header ==="
           readelf -h output/illumina_android_arm64
+
+          echo "=== Program headers ==="
           readelf -l output/illumina_android_arm64
 
-      - name: Upload Artifact
+      - name: Upload Android ARM64 Binary
         uses: actions/upload-artifact@v4
         with:
           name: illumina-android-arm64

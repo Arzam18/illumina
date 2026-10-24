@@ -94,24 +94,23 @@ jobs:
           grep -n -E 'arm64_neon|NEON|sse2neon|march=' \
             build/build.ninja 2>/dev/null || true
 
-      - name: Build Executable
+      - name: Build Android ARM64 Engine Only
         run: |
-          cmake --build build --parallel 2
+          cmake --build build \
+            --target illumina_cli_arm64_neon \
+            --parallel 2
 
       - name: Locate and Verify Executable
         run: |
           set -eu
           mkdir -p output
 
-          echo "=== Candidate executables ==="
-          find build -type f -executable -print
+          BIN="build/cli/illumina_4_arm64_neon_android_64-bit"
 
-          BIN="$(find build -type f -name illumina \
-            -executable -print -quit)"
-
-          if [ -z "$BIN" ]; then
-            echo "::error::Could not find the illumina executable."
-            echo "Check the CMake target name and build output."
+          if [ ! -f "$BIN" ]; then
+            echo "::error::Android ARM64 engine executable not found."
+            echo "Searching for available engine executables:"
+            find build/cli -maxdepth 1 -type f -print
             exit 1
           fi
 
@@ -121,11 +120,11 @@ jobs:
           echo "=== Binary file information ==="
           file output/illumina_android_arm64
 
-          echo "=== ELF header ==="
+          echo "=== Verify ARM64 ELF architecture ==="
           readelf -h output/illumina_android_arm64
 
-          echo "=== Program headers ==="
-          readelf -l output/illumina_android_arm64
+          echo "=== Verify NEON build configuration ==="
+          grep -n -E 'NEON|arm64_neon' build/build.ninja | head -20 || true
 
       - name: Upload Android ARM64 Binary
         uses: actions/upload-artifact@v4
